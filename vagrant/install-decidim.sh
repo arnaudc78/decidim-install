@@ -28,6 +28,8 @@ echo -e "*                                                                     *
 echo -e "***********************************************************************"
 
 set -e
+RUBY_VERSION="2.5.1"
+VERBOSE=
 
 info() {
 	echo -e "$1"
@@ -48,13 +50,16 @@ exit_help() {
 	info "This script tries to be idempotent (ie: it can be run repeatedly)\n"
 	info "Options:"
 	info " -y          Do not ask for confirmation to run the script"
+	info " -v          Be verbose (when possible)"
 	info " -h          Show this help"
 	info " -s[step]    Skip the [step] specified. Multiple steps can be"
-	info "             specified with several -s options\n"
-	info "             Valid steps are (in order of execution):"
-	info "              check     Check if we are using Ubuntu 18.04"
-	info "              prepare   Update system, configure timezone"
-	info "              rbenv     Install ruby through rbenv"
+	info "             specified with several -s options"
+	info " -o[step]    Execute only the [step] specified. Multiple steps can be"
+	info "             specified with several -o options\n"
+	info "Valid steps are (in order of execution):"
+	info " check     Check if we are using Ubuntu 18.04"
+	info " prepare   Update system, configure timezone"
+	info " rbenv     Install ruby through rbenv"
 	trap - EXIT
 	exit
 }
@@ -111,7 +116,7 @@ step_rbenv() {
 	if [ -d "$HOME/.rbenv" ]; then
 		yellow "$HOME/.rbenv already exists!"
 	else
-		info "Installing rbenv from GIT"
+		info "Installing rbenv from GIT source"
 		git clone https://github.com/rbenv/rbenv.git $HOME/.rbenv
 	fi
 	if grep -Fxq 'export PATH="$HOME/.rbenv/bin:$PATH"' "$HOME/.bashrc" ; then
@@ -136,14 +141,67 @@ step_rbenv() {
 		type rbenv
 		exit 1
 	fi
-
 	# resume EXIT trap
 	trap cleanup EXIT
+
+	if [ -d "$HOME/.rbenv/plugins/ruby-build" ]; then
+		yellow "$HOME/.rbenv/plugins/ruby-build already exists!"
+	else
+		info "Installing ruby-build from GIT source"
+		git clone https://github.com/rbenv/ruby-build.git $HOME/.rbenv/plugins/ruby-build
+	fi
+
+	if rbenv install -l | grep -Fq "$RUBY_VERSION"; then
+		green "Ruby $RUBY_VERSION rbenv available for installation"
+	fi
+
+	if [ $(rbenv global) == "$RUBY_VERSION" ]; then
+		yellow "Ruby $RUBY_VERSION already installed"
+	else
+		info "Installing ruby $RUBY_VERSION, please be patient, it's going to be a while..."
+		rbenv install 2.5.1 -f $VERBOSE
+		rbenv global 2.5.1
+	fi
+
+	if [[ $(ruby -v) == "ruby $RUBY_VERSION"* ]]; then
+		green "$(ruby -v) installed successfully"
+	fi
 }
 
-STEPS=("check" "prepare" "rbenv")
-SKIP=
+step_gems() {
+	info "Installing generator dependencies"
+	sudo apt install -y nodejs imagemagick libpq-dev
+	info "Installing bundler"
+	if [ -f "$HOME/.gemrc" ] ; then
+		yellow "$HOME/.gemrc already created"
+	else
+		info "Creating $HOME/.gemrc"
+		echo "gem: --no-document" > $HOME/.gemrc
+	fi
+
+	info "Installing bundler"
+	gem install bundler
+	gem update --system
+	if [[ $(gem env home) == *".rbenv/versions/$RUBY_VERSION/lib/ruby/gems/"* ]]; then
+		green "Gems environment installed successfully"
+	fi
+	info "Installing Decidim gem"
+	gem install decidim
+}
+
+STEPS=("check" "prepare" "rbenv" "gems")
+SKIP=()
+ONLY=()
 install() {
+	if [[ "${ONLY[@]}" ]]; then
+		SKIP=()
+		for step in "${STEPS[@]}"; do
+			if [[ " ${ONLY[*]} " != *" $step "* ]]; then
+				SKIP+=("$step")
+			fi
+		done
+		echo ${SKIP[@]}
+	fi
 	for i in "${!STEPS[@]}"; do
 		step=${STEPS[i]}
 		if [[ " ${SKIP[*]} " == *" $step "* ]]; then
@@ -173,11 +231,13 @@ confirm() {
 }
 
 CONFIRM=1
-while getopts yhs: option; do
+while getopts yhvs:o: option; do
 	case "${option}" in
 		y ) yellow "No asking for confirmation"; CONFIRM=0;;
 		h ) exit_help;;
+		v ) VERBOSE="-v";;
 		s ) SKIP+=("$OPTARG");;
+		o ) ONLY+=("$OPTARG");;
 	esac
 done
 
@@ -186,4 +246,3 @@ if [ "$CONFIRM" == "1" ]; then
 else
 	start
 fi
-
