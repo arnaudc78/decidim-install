@@ -221,7 +221,7 @@ step_decidim() {
 		decidim "$FOLDER"
 	fi
 
-	cd "$FOLDER"
+	cd $(realpath $FOLDER)
 
 	if grep -Fq 'gem "figaro"' Gemfile ; then
 		info "Gem figaro already installed"
@@ -260,6 +260,16 @@ step_decidim() {
 	if ! grep -Fq 'DATABASE_URL:' ./config/application.yml ; then
 		echo "DATABASE_URL: postgres://$CONF_DB_USER:$CONF_DB_PASS@$CONF_DB_HOST/$CONF_DB_NAME" >> ./config/application.yml
 	fi
+}
+
+get_conf_vars() {
+	if [ -z "$FOLDER" ]; then
+		yellow "Please specify a folder to install decidim"
+		info "Runt $0 with -h to view options for this script"
+		exit 0
+	fi
+	init_rbenv
+	cd $(realpath $FOLDER)
 
 	CONF_DATABASE=$(awk '/DATABASE_URL\:/{print $2}' config/application.yml)
 	re="postgres\:\/\/(.+):(.+)@(.+)/(.+)"
@@ -278,10 +288,28 @@ step_decidim() {
 		red "Couldn't extract database password from config/application.yml!"
 		exit 1
 	fi
+	if [ -z "$CONF_DB_HOST" ]; then
+		red "Couldn't extract database host from config/application.yml!"
+		exit 1
+	fi
+	if [ -z "$CONF_DB_NAME" ]; then
+		red "Couldn't extract database name from config/application.yml!"
+		exit 1
+	fi
 }
 
 step_postgres() {
+	get_conf_vars
 	green "Installing PostgreSQL"
+	sudo apt -y install postgresql
+
+	if sudo -u postgres psql -tAc "SELECT 1 FROM pg_roles WHERE rolname='$CONF_DB_USER'" | grep -q 1 ; then
+		yellow "User $CONF_DB_USER already exists in postgresql"
+	else
+		info "Creating user $CONF_DB_USER"
+		sudo -u postgres psql -c "CREATE USER $CONF_DB_USER WITH SUPERUSER CREATEDB NOCREATEROLE PASSWORD '$CONF_DB_PASS'"
+	fi
+
 }
 
 STEPS=("check" "prepare" "rbenv" "gems" "decidim" "postgres")
