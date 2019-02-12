@@ -45,10 +45,10 @@ red() {
 }
 exit_help() {
 	info "\nUsage:"
-	info " $0 [options]\n"
-	info "Installs Decidim and all necessary dependencies in Ubuntu 18.04\n"
+	info " $0 [OPTIONS] [FOLDER]\n"
+	info "Installs Decidim into FOLDER and all necessary dependencies in Ubuntu 18.04\n"
 	info "This script tries to be idempotent (ie: it can be run repeatedly)\n"
-	info "Options:"
+	info "OPTIONS:"
 	info " -y          Do not ask for confirmation to run the script"
 	info " -v          Be verbose (when possible)"
 	info " -h          Show this help"
@@ -88,10 +88,12 @@ step_check() {
 	fi
 	if [ $(awk -F= '/^ID=/{print $2}' /etc/os-release) != "ubuntu" ]; then
 		red "Not an ubuntu system!"
+		cat /etc/os-release
 		exit 1
 	fi
-	if [ $(awk -F= '/^VERSION_ID=/{print $2}' /etc/os-release) != "18.04" ]; then
+	if [ $(awk -F= '/^VERSION_ID=/{print $2}' /etc/os-release) != '"18.04"' ]; then
 		red "Not ubuntu 18.04!"
+		awk -F= '/^VERSION_ID=/{print $2}' /etc/os-release
 		exit 1
 	fi
 }
@@ -108,6 +110,10 @@ step_prepare() {
 		 libreadline6-dev zlib1g-dev libncurses5-dev libffi-dev libgdbm-dev
 }
 
+init_rbenv() {
+	export PATH="$HOME/.rbenv/bin:$PATH"
+	eval "$(rbenv init -)"
+}
 step_rbenv() {
 	# pause EXIT trap
 	trap - EXIT
@@ -131,7 +137,7 @@ step_rbenv() {
 		info "Installing rbenv init in bashrc"
 		echo 'eval "$(rbenv init -)"' >> "$HOME/.bashrc"
 	fi
-	source "$HOME/.bashrc"
+	init_rbenv
 	if rbenv version | grep -Fq ".rbenv/version"; then
 		green "rbenv successfully installed"
 	else
@@ -165,12 +171,14 @@ step_rbenv() {
 
 	if [[ $(ruby -v) == "ruby $RUBY_VERSION"* ]]; then
 		green "$(ruby -v) installed successfully"
+		info "It is recommended to logout and login again to activate .bashrc"
 	fi
 }
 
 step_gems() {
 	info "Installing generator dependencies"
 	sudo apt install -y nodejs imagemagick libpq-dev
+	init_rbenv
 	info "Installing bundler"
 	if [ -f "$HOME/.gemrc" ] ; then
 		yellow "$HOME/.gemrc already created"
@@ -184,12 +192,99 @@ step_gems() {
 	gem update --system
 	if [[ $(gem env home) == *".rbenv/versions/$RUBY_VERSION/lib/ruby/gems/"* ]]; then
 		green "Gems environment installed successfully"
+	else
+		red "gem home failed! $(gem env home)!"
+		exit 1
 	fi
 	info "Installing Decidim gem"
 	gem install decidim
 }
 
-STEPS=("check" "prepare" "rbenv" "gems")
+FOLDER=
+CONF_SECRET=
+CONF_DATABASE=
+CONF_DB_USER=decidim_app
+CONF_DB_PASS=$(head /dev/urandom | tr -dc A-Za-z0-9 | head -c 13 ; echo '')
+CONF_DB_HOST=localhost
+CONF_DB_NAME=decidim_prod
+step_decidim() {
+	if [ -z "$FOLDER" ]; then
+		yellow "Please specify a folder to install decidim"
+		info "Runt $0 with -h to view options for this script"
+		exit 0
+	fi
+	init_rbenv
+	green "Installing Decidim in $FOLDER"
+	if [ -d "$FOLDER" ]; then
+		yellow "$FOLDER already exists, trying to install gems anyway"
+	else
+		decidim "$FOLDER"
+	fi
+
+	cd "$FOLDER"
+
+	if grep -Fq 'gem "figaro"' Gemfile ; then
+		info "Gem figaro already installed"
+	else
+		bundle add figaro --skip-install
+	fi
+	if grep -Fq 'gem "passenger"' Gemfile ; then
+		info "Gem passenger already installed"
+	else
+		bundle add passenger --group production --skip-install
+	fi
+	if grep -Fq 'gem "delayed_job_active_record"' Gemfile ; then
+		info "Gem delayed_job_active_record already installed"
+	else
+		bundle add delayed_job_active_record --group production --skip-install
+	fi
+	if grep -Fq 'gem "daemons"' Gemfile ; then
+		info "Gem daemons already installed"
+	else
+		bundle add daemons --group production --skip-install
+	fi
+	bundle install
+
+	if [ -f "./config/application.yml" ]; then
+		yellow "config/application.yml already present"
+	else
+		green "Creating config/application.yml with automatic values"
+		touch ./config/application.yml
+	fi
+
+	if ! grep -Fq 'SECRET_KEY_BASE:' ./config/application.yml ; then
+		echo "SECRET_KEY_BASE: $(rake secret)" >> ./config/application.yml
+	fi
+	CONF_SECRET=$(awk '/SECRET_KEY_BASE\:/{print $2}' config/application.yml)
+
+	if ! grep -Fq 'DATABASE_URL:' ./config/application.yml ; then
+		echo "DATABASE_URL: postgres://$CONF_DB_USER:$CONF_DB_PASS@$CONF_DB_HOST/$CONF_DB_NAME" >> ./config/application.yml
+	fi
+
+	CONF_DATABASE=$(awk '/DATABASE_URL\:/{print $2}' config/application.yml)
+	re="postgres\:\/\/(.+):(.+)@(.+)/(.+)"
+	if [[ "$CONF_DATABASE" =~ $re ]]; then
+		CONF_DB_USER="${BASH_REMATCH[1]}";
+		CONF_DB_PASS="${BASH_REMATCH[2]}";
+		CONF_DB_HOST="${BASH_REMATCH[3]}";
+		CONF_DB_NAME="${BASH_REMATCH[4]}";
+	fi
+
+	if [ -z "$CONF_DB_USER" ]; then
+		red "Couldn't extract database user from config/application.yml!"
+		exit 1
+	fi
+	if [ -z "$CONF_DB_PASS" ]; then
+		red "Couldn't extract database password from config/application.yml!"
+		exit 1
+	fi
+}
+
+step_postgres() {
+	green "Installing PostgreSQL"
+}
+
+STEPS=("check" "prepare" "rbenv" "gems" "decidim" "postgres")
 SKIP=()
 ONLY=()
 install() {
@@ -240,6 +335,8 @@ while getopts yhvs:o: option; do
 		o ) ONLY+=("$OPTARG");;
 	esac
 done
+shift $(($OPTIND - 1))
+FOLDER="$1"
 
 if [ "$CONFIRM" == "1" ]; then
 	confirm
