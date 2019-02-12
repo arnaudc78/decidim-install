@@ -55,7 +55,9 @@ exit_help() {
 	info " -s[step]    Skip the [step] specified. Multiple steps can be"
 	info "             specified with several -s options"
 	info " -o[step]    Execute only the [step] specified. Multiple steps can be"
-	info "             specified with several -o options\n"
+	info "             specified with several -o options"
+	info " -e[email]   Specify Decidim system admin email"
+	info " -p[pass]    Specify Decidim system admin password"
 	info "Valid steps are (in order of execution):"
 	info " check     Check if we are using Ubuntu 18.04"
 	info " prepare   Update system, configure timezone"
@@ -96,6 +98,7 @@ step_check() {
 		awk -F= '/^VERSION_ID=/{print $2}' /etc/os-release
 		exit 1
 	fi
+	# TODO: check for system memory
 }
 
 step_prepare() {
@@ -207,6 +210,8 @@ CONF_DB_USER=decidim_app
 CONF_DB_PASS=$(head /dev/urandom | tr -dc A-Za-z0-9 | head -c 13 ; echo '')
 CONF_DB_HOST=localhost
 CONF_DB_NAME=decidim_prod
+DECIDIM_EMAIL=
+DECIDIM_PASS=
 step_decidim() {
 	if [ -z "$FOLDER" ]; then
 		yellow "Please specify a folder to install decidim"
@@ -309,10 +314,40 @@ step_postgres() {
 		info "Creating user $CONF_DB_USER"
 		sudo -u postgres psql -c "CREATE USER $CONF_DB_USER WITH SUPERUSER CREATEDB NOCREATEROLE PASSWORD '$CONF_DB_PASS'"
 	fi
+}
+
+step_create(){
+	get_conf_vars
+	green "Database creation and migration"
+
+	bin/rails db:create RAILS_ENV=production
+	bin/rails assets:precompile db:migrate RAILS_ENV=production
+
+	local email="$DECIDIM_EMAIL"
+	local pass="$DECIDIM_PASS"
+	if [ -z "$email" ]; then
+		read -p "Introduce your system admin email: " email
+	else
+		info "Using email [$email]"
+	fi
+
+	if bin/rails runner -e production "puts Decidim::System::Admin.exists?(email: '$email')" ; then
+		yellow "System admin with email [$email] already exists!"
+	else
+		if [ -z "$pass" ]; then
+			read -p "Introduce your system admin password: " pass
+		else
+			info "Using password from options"
+		fi
+
+		info "Creating system admin with email [$email]"
+		bin/rails runner -e production "Decidim::System::Admin.new(email: '$email', password: '$pass', password_confirmation: '$pass').save!"
+	fi
+
 
 }
 
-STEPS=("check" "prepare" "rbenv" "gems" "decidim" "postgres")
+STEPS=("check" "prepare" "rbenv" "gems" "decidim" "postgres" "create")
 SKIP=()
 ONLY=()
 install() {
@@ -336,17 +371,18 @@ install() {
 	done
 }
 
-start() {
+main() {
 	trap cleanup EXIT
 	trap abort INT TERM
 	install
+	exit
 }
 
 confirm() {
 	while true; do
 	    read -p "Do you wish to continue? [y/N]" yn
 	    case $yn in
-	        [Yy]* ) start; break;;
+	        [Yy]* ) main; break;;
 	        [Nn]* ) exit;;
 	        * ) abort;;
 	    esac
@@ -354,13 +390,15 @@ confirm() {
 }
 
 CONFIRM=1
-while getopts yhvs:o: option; do
+while getopts yhvs:o:e:p: option; do
 	case "${option}" in
 		y ) yellow "No asking for confirmation"; CONFIRM=0;;
 		h ) exit_help;;
 		v ) VERBOSE="-v";;
 		s ) SKIP+=("$OPTARG");;
 		o ) ONLY+=("$OPTARG");;
+		e ) DECIDIM_EMAIL="$OPTARG";;
+		p ) DECIDIM_PASS="$OPTARG";;
 	esac
 done
 shift $(($OPTIND - 1))
@@ -369,5 +407,5 @@ FOLDER="$1"
 if [ "$CONFIRM" == "1" ]; then
 	confirm
 else
-	start
+	main
 fi
