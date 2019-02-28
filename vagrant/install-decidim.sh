@@ -27,49 +27,81 @@ echo -e "* https://github.com/Platoniq/decidim-install                         *
 echo -e "*                                                                     *"
 echo -e "***********************************************************************"
 
-set -e
-RUBY_VERSION="2.5.1"
+####################################
+# Config vars (use -h to overwrite)
+####################################
+
+
+RUBY_VERSION="2.5.3"
 VERBOSE=
+CONFIRM=1
+STEPS=("check" "prepare" "rbenv" "gems" "decidim" "postgres" "create")
+# default environment to be configured
+ENVIRONMENT="production"
+
+###################
+# Function library
+###################
+
+# exit on fail (trap on some cases applies)
+set -e
 
 info() {
 	echo -e "$1"
 }
+
 yellow() {
 	echo -e "\e[33m$1\e[0m"
 }
+
 green() {
 	echo -e "\e[32m$1\e[0m"
 }
+
 red() {
 	echo -e "\e[31m$1\e[0m"
 }
+
 exit_help() {
 	info "\nUsage:"
 	info " $0 [OPTIONS] [FOLDER]\n"
 	info "Installs Decidim into FOLDER and all necessary dependencies in Ubuntu 18.04\n"
-	info "This script tries to be idempotent (ie: it can be run repeatedly)\n"
+	info "This script tries to be idempotent meaning that it can be run repeatedly"
+	info "without breaking things or changing values in already configured steps\n"
 	info "OPTIONS:"
-	info " -y          Do not ask for confirmation to run the script"
-	info " -v          Be verbose (when possible)"
 	info " -h          Show this help"
-	info " -s[step]    Skip the [step] specified. Multiple steps can be"
+	info " -f          Do not ask for confirmation to run the script"
+	info " -v          Be verbose (when possible)"
+	info " -r [ver]    Specify ruby version (default is $RUBY_VERSION)"
+	info " -e [env]    Specify rails environment (default is $ENVIRONMENT)"
+	info " -s [step]   Skip the step specified. Multiple steps can be"
 	info "             specified with several -s options"
-	info " -o[step]    Execute only the [step] specified. Multiple steps can be"
+	info " -o [step]   Execute only the step specified. Multiple steps can be"
 	info "             specified with several -o options"
-	info " -e[email]   Specify Decidim system admin email"
-	info " -p[pass]    Specify Decidim system admin password"
-	info "Valid steps are (in order of execution):"
-	info " check     Check if we are using Ubuntu 18.04"
-	info " prepare   Update system, configure timezone"
-	info " rbenv     Install ruby through rbenv"
+	info " -u [email]  Specify Decidim system admin email"
+	info " -p [pass]   Specify Decidim system admin password"
+	info "\nValid steps are (in order of execution):"
+	info " check     Checks if we are using Ubuntu 18.04"
+	info " prepare   Updates system, configure timezone"
+	info " rbenv     Installs ruby through rbenv"
+	info " gems      Installs Ruby gems bundler and decidim"
+	info " decidim   Installs Decidim into FOLDER and generates database credentials if necessary"
+	info " postgres  Installs PostgreSQL and creates the user using the generated credentials"
+	info " create    Creates the database and the first system admin user"
 	trap - EXIT
 	exit
 }
+
+# Disables traps and exits immediately
+# Used to trap INT and TERM signals
 abort() {
 	red "Aborted by the user!"
 	trap - EXIT
 	exit
 }
+
+# Checks the last command result on exit
+# Used to trap the EXIT signal of this script
 cleanup() {
 	rv=$?
 	if [ "$rv" -ne 0 ]; then
@@ -117,6 +149,7 @@ init_rbenv() {
 	export PATH="$HOME/.rbenv/bin:$PATH"
 	eval "$(rbenv init -)"
 }
+
 step_rbenv() {
 	# pause EXIT trap
 	trap - EXIT
@@ -150,6 +183,7 @@ step_rbenv() {
 		type rbenv
 		exit 1
 	fi
+
 	# resume EXIT trap
 	trap cleanup EXIT
 
@@ -236,17 +270,17 @@ step_decidim() {
 	if grep -Fq 'gem "passenger"' Gemfile ; then
 		info "Gem passenger already installed"
 	else
-		bundle add passenger --group production --skip-install
+		bundle add passenger --group $ENVIRONMENT --skip-install
 	fi
 	if grep -Fq 'gem "delayed_job_active_record"' Gemfile ; then
 		info "Gem delayed_job_active_record already installed"
 	else
-		bundle add delayed_job_active_record --group production --skip-install
+		bundle add delayed_job_active_record --group $ENVIRONMENT --skip-install
 	fi
 	if grep -Fq 'gem "daemons"' Gemfile ; then
 		info "Gem daemons already installed"
 	else
-		bundle add daemons --group production --skip-install
+		bundle add daemons --group $ENVIRONMENT --skip-install
 	fi
 	bundle install
 
@@ -320,8 +354,8 @@ step_create(){
 	get_conf_vars
 	green "Database creation and migration"
 
-	bin/rails db:create RAILS_ENV=production
-	bin/rails assets:precompile db:migrate RAILS_ENV=production
+	bin/rails db:create RAILS_ENV=$ENVIRONMENT
+	bin/rails assets:precompile db:migrate RAILS_ENV=$ENVIRONMENT
 
 	local email="$DECIDIM_EMAIL"
 	local pass="$DECIDIM_PASS"
@@ -331,7 +365,7 @@ step_create(){
 		info "Using email [$email]"
 	fi
 
-	if bin/rails runner -e production "puts Decidim::System::Admin.exists?(email: '$email')" ; then
+	if bin/rails runner -e $ENVIRONMENT "puts Decidim::System::Admin.exists?(email: '$email')" ; then
 		yellow "System admin with email [$email] already exists!"
 	else
 		if [ -z "$pass" ]; then
@@ -341,13 +375,11 @@ step_create(){
 		fi
 
 		info "Creating system admin with email [$email]"
-		bin/rails runner -e production "Decidim::System::Admin.new(email: '$email', password: '$pass', password_confirmation: '$pass').save!"
+		bin/rails runner -e $ENVIRONMENT "Decidim::System::Admin.new(email: '$email', password: '$pass', password_confirmation: '$pass').save!"
 	fi
-
-
 }
 
-STEPS=("check" "prepare" "rbenv" "gems" "decidim" "postgres" "create")
+
 SKIP=()
 ONLY=()
 install() {
@@ -389,15 +421,16 @@ confirm() {
 	done
 }
 
-CONFIRM=1
-while getopts yhvs:o:e:p: option; do
+while getopts fhr:e:vs:o:u:p: option; do
 	case "${option}" in
-		y ) yellow "No asking for confirmation"; CONFIRM=0;;
+		f ) yellow "No asking for confirmation"; CONFIRM=0;;
 		h ) exit_help;;
 		v ) VERBOSE="-v";;
+		r ) RUBY_VERSION="$OPTARG";;
+		e ) ENVIRONMENT="$OPTARG";;
 		s ) SKIP+=("$OPTARG");;
 		o ) ONLY+=("$OPTARG");;
-		e ) DECIDIM_EMAIL="$OPTARG";;
+		u ) DECIDIM_EMAIL="$OPTARG";;
 		p ) DECIDIM_PASS="$OPTARG";;
 	esac
 done
